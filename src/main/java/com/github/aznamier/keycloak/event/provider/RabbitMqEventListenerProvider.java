@@ -1,9 +1,10 @@
 package com.github.aznamier.keycloak.event.provider;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.*;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import org.jboss.logging.Logger;
 import org.keycloak.events.Event;
 import org.keycloak.events.EventListenerProvider;
@@ -15,6 +16,7 @@ import com.rabbitmq.client.AMQP;
 import com.rabbitmq.client.AMQP.BasicProperties;
 import com.rabbitmq.client.AMQP.BasicProperties.Builder;
 import com.rabbitmq.client.Channel;
+import org.keycloak.util.JsonSerialization;
 
 public class RabbitMqEventListenerProvider implements EventListenerProvider {
 
@@ -63,7 +65,7 @@ public class RabbitMqEventListenerProvider implements EventListenerProvider {
 		String routingKey = RabbitMqConfig.calculateRoutingKey(adminEvent, session);
 		String messageString = RabbitMqConfig.writeAsJson(msg, true);
 
-		BasicProperties msgProps = RabbitMqEventListenerProvider.getMessageProps(EventAdminNotificationMqMsg.class.getName());
+		BasicProperties msgProps = RabbitMqEventListenerProvider.getMessageProps(EventAdminNotificationMqMsg.class.getName(), adminEvent);
 		this.publishNotification(messageString,msgProps, routingKey);
 	}
 	
@@ -71,7 +73,25 @@ public class RabbitMqEventListenerProvider implements EventListenerProvider {
 		
 		Map<String,Object> headers = new HashMap<>();
 		headers.put("__TypeId__", className);
-		
+		headers.put("aw_modified", true);
+
+		Builder propsBuilder = new AMQP.BasicProperties.Builder()
+				.appId("Keycloak")
+				.headers(headers)
+				.contentType("application/json")
+				.contentEncoding("UTF-8");
+		return propsBuilder.build();
+	}
+
+	private static BasicProperties getMessageProps(String className, AdminEvent adminEvent) {
+		Map<String,Object> headers = new HashMap<>();
+		headers.put("__TypeId__", className);
+		headers.put("aw_modified", true);
+
+		if (ScimInducedEventDetector.isScimInducedEvent(adminEvent)) {
+			headers.put("scim", true);
+		}
+
 		Builder propsBuilder = new AMQP.BasicProperties.Builder()
 				.appId("Keycloak")
 				.headers(headers)
@@ -89,4 +109,31 @@ public class RabbitMqEventListenerProvider implements EventListenerProvider {
 		}
 	}
 
+	public static class ScimInducedEventDetector {
+		private static final List<?> SCIM_NAMESPACES = Arrays.asList(
+			"urn:ietf:params:scim:schemas:core:2.0:User",
+			"urn:ietf:params:scim:schemas:core:2.0:Group"
+		);
+
+		public static boolean isScimInducedEvent(AdminEvent adminEvent) {
+			if (adminEvent.getRepresentation() == null) {
+				return false;
+			}
+
+			Map<String,Object> representationMap;
+			try {
+				representationMap = JsonSerialization.readValue(adminEvent.getRepresentation(), new TypeReference<Map<String,Object>>() {});
+			} catch (IOException e) {
+				return false;
+			}
+
+			if (representationMap == null) {
+				return false;
+			}
+
+			Object schemas = representationMap.get("schemas");
+			return schemas instanceof ArrayList &&
+				((ArrayList<?>) schemas).stream().anyMatch(SCIM_NAMESPACES::contains);
+		}
+	}
 }
